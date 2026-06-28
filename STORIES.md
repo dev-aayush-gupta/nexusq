@@ -65,7 +65,7 @@ flowchart TD
 | # | Story | Status           | AI-tag mix |
 |---|-------|------------------|------------|
 | 0 | Initialization | -[x] Done        | mostly no-AI / AI-low |
-| 1 | Walking skeleton (Postgres only) | - [ ] Not started | mixed |
+| 1 | Walking skeleton (Postgres only) | -[x] Done        | mixed |
 | 2 | Dual-layer storage + outbox relay | - [ ] Not started | mostly no-AI |
 | 3 | Leasing + heartbeats | - [ ] Not started | mostly no-AI |
 | 4 | Priority scheduling | - [ ] Not started | mixed |
@@ -126,13 +126,13 @@ flowchart TD
 **Depends on:** Story 0. **Unlocks:** Story 2.
 
 ### Subtasks
-- [ ] **1.1** `Job` entity + JPA repository: `id` (UUID), `payload` (jsonb), `status` (string), `priority` (string, unused until Story 4), `created_at`, `updated_at` — *15 min, AI-low*
-- [ ] **1.2** Flyway/Liquibase migration for the `jobs` table — *10 min, AI-heavy — pure DDL*
-- [ ] **1.3** `POST /jobs` — accepts payload, inserts `PENDING` row, returns job id — *15 min, AI-low*
-- [ ] **1.4** `GET /jobs/{id}` — returns current status + payload — *10 min, AI-low*
-- [ ] **1.5** A trivial single-thread polling worker using `SELECT ... FOR UPDATE SKIP LOCKED`, sets `RUNNING`, "processes" (sleep/log), sets `COMPLETED` — *20 min, no-AI — your first taste of concurrent row claiming; you'll replace this in Story 3, but write it yourself*
-- [ ] **1.6** Integration test: submit, poll until `COMPLETED`, assert final state — *15 min, no-AI — sets the testing pattern for everything after*
-- [ ] **1.7** Deliberately kill the worker mid-job, restart, confirm the job is now stuck `RUNNING` forever. Log this as a known, accepted gap in `decisions.md` — *10 min, no-AI — this is the failure-first ground rule in action*
+- [x] **1.1** `Job` entity + JPA repository: `id` (UUID), `payload` (jsonb), `status` (string), `priority` (string, unused until Story 4), `created_at`, `updated_at` — *15 min, AI-low*
+- [x] **1.2** Flyway/Liquibase migration for the `jobs` table — *10 min, AI-heavy — pure DDL*
+- [x] **1.3** `POST /jobs` — accepts payload, inserts `PENDING` row, returns job id — *15 min, AI-low*
+- [x] **1.4** `GET /jobs/{id}` — returns current status + payload — *10 min, AI-low*
+- [x] **1.5** A trivial single-thread polling worker using `SELECT ... FOR UPDATE SKIP LOCKED`, sets `RUNNING`, "processes" (sleep/log), sets `COMPLETED` — *20 min, no-AI — your first taste of concurrent row claiming; you'll replace this in Story 3, but write it yourself*
+- [x] **1.6** Integration test: submit, poll until `COMPLETED`, assert final state — *15 min, no-AI — sets the testing pattern for everything after*
+- [x] **1.7** Deliberately kill the worker mid-job, restart, confirm the job is now stuck `RUNNING` forever. Log this as a known, accepted gap in `decisions.md` — *10 min, no-AI — this is the failure-first ground rule in action*
 
 ### Acceptance criteria
 - `POST /jobs` → `GET /jobs/{id}` returns `COMPLETED` within seconds under normal operation.

@@ -28,6 +28,164 @@
 
 ---
 
+---
+
+## [Story 1] — Package-by-feature structure over package-by-layer
+
+**Decision:** Organise code under `job/` (feature) with sub-packages like `job/worker/`, rather than top-level `controller/`, `service/`, `repository/` layers.
+
+**Alternatives considered:** Classic layered structure — `controller/JobController.java`, `service/JobService.java`, `repository/JobRepository.java`.
+
+**Why not:** Package-by-layer groups files by what they technically are, not what they do together. As Stories 2–10 add relay, leasing, DLQ, and Kafka, each feature gets its own sibling package (`relay/`, `leasing/`, `dlq/`) that is self-contained. In a layered structure, a single feature's files are spread across four directories — a change to the relay touches `controller/`, `service/`, `repository/`, and `model/` simultaneously. Package-by-feature keeps related files co-located and makes the blast radius of a change obvious.
+
+**Revisit if:** A genuine cross-feature abstraction emerges that doesn't belong to any one feature — at which point a `common/` or `shared/` package is the right addition, not a full restructure.
+
+---
+
+## [Story 1] — `payload` stored as JSONB not TEXT
+
+**Decision:** Store job payload as `JSONB` in Postgres, mapped as a raw `String` in Java.
+
+**Alternatives considered:** `TEXT` (dumb string, no validation), `Map<String, Object>` with a JPA converter (structured but format-coupled), `BLOB` (opaque bytes).
+
+**Why not:** `TEXT` accepts any string including malformed JSON — Postgres has no way to validate or query inside it. `BLOB` is entirely opaque. `Map<String, Object>` adds a conversion layer between Java and Postgres and couples the storage format to Jackson's map representation. JSONB validates at insert time, supports `->>`  field queries, and supports GIN indexing for future payload-based filtering — all at zero cost today.
+
+**Trade-off accepted:** JSONB rejects non-JSON payloads at the database level. If NexusQ ever needs to carry XML, CSV, or binary payloads, the column would need to change to `TEXT` with application-layer validation, or a `content_type` field added alongside a `TEXT` column. The right boundary for a general-purpose queue is probably `TEXT` with app-layer validation — JSONB is the defensible choice for this project's scope.
+
+**Revisit if:** A requirement for non-JSON payload formats appears.
+
+---
+
+## [Story 1] — `status` and `priority` as Java enums stored as strings
+
+**Decision:** `JobStatus` and `JobPriority` are Java enums, stored in Postgres as `VARCHAR` using `@Enumerated(EnumType.STRING)`.
+
+**Alternatives considered:** Plain `String` fields on the entity (no enum); enums stored as integers using `@Enumerated(EnumType.ORDINAL)` (JPA default).
+
+**Why not plain String:** A string field allows any value including typos — `"RUNING"`, `"pending"`, `"done"` — all compile and persist silently. An enum makes invalid states unrepresentable at compile time.
+
+**Why not ORDINAL:** JPA's default `EnumType.ORDINAL` stores `PENDING=0`, `RUNNING=1`, `COMPLETED=2` etc. Reordering the enum values — a trivial refactor — silently corrupts every existing row. `EnumType.STRING` stores `"PENDING"`, `"RUNNING"` — reordering is safe, and the database is human-readable without a lookup table.
+
+**Revisit if:** Never for ORDINAL. The plain String question may be revisited in Story 6 when the GoF State pattern replaces the enum entirely — at that point the Java type changes but the `VARCHAR` column stays.
+
+---
+
+## [Story 1] — UUID generated in Java, not the database
+
+**Decision:** Use `@GeneratedValue(strategy = GenerationType.UUID)` — Hibernate generates the UUID in Java before the insert.
+
+**Alternatives considered:** Database-generated UUID via `DEFAULT gen_random_uuid()` in Postgres; database sequence (`BIGSERIAL`).
+
+**Why not database UUID:** With a database-generated UUID, you must do the insert first and then ask the database for the ID it assigned. You cannot pre-register the job in Redis, build a response, or do anything with the ID before persisting. Java-generated UUIDs are known before the insert — useful from Story 2 onward when the outbox relay needs to reference the ID before Redis push.
+
+**Why not BIGSERIAL:** Sequential integer IDs are guessable — `GET /jobs/1`, `GET /jobs/2`. UUID is not. For an API that returns job IDs to callers, non-guessable IDs are a basic security property.
+
+**Revisit if:** Performance profiling shows UUID primary key causing index fragmentation under very high insert volume — at which point UUIDv7 (time-ordered UUID) is the fix, not a revert to sequences.
+
+---
+
+## [Story 1] — `TIMESTAMPTZ` over `TIMESTAMP` for all time columns
+
+**Decision:** Use `TIMESTAMPTZ` (timestamp with time zone) for `created_at` and `updated_at`.
+
+**Alternatives considered:** `TIMESTAMP` (no timezone), `BIGINT` epoch milliseconds.
+
+**Why not TIMESTAMP:** Postgres stores `TIMESTAMP` as a local value with no timezone context. If the database server's timezone ever changes — OS reconfiguration, cloud migration, DST — every stored timestamp silently shifts meaning. `TIMESTAMPTZ` stores in UTC internally and converts on read, so the stored value is always unambiguous regardless of server configuration.
+
+**Why not BIGINT epoch:** Readable in code but opaque in the database — you cannot use Postgres date functions, range queries, or dashboard tools without conversion. `TIMESTAMPTZ` is directly queryable.
+
+**Revisit if:** Never. This is always the right choice in Postgres.
+
+---
+
+## [Story 1] — Flyway for schema management, Hibernate in validate mode
+
+**Decision:** Flyway owns all schema changes via versioned SQL migration files. Hibernate's `ddl-auto` is set to `validate` — it checks but never modifies the schema.
+
+**Alternatives considered:** `ddl-auto=update` (Hibernate auto-alters schema); `ddl-auto=create-drop` (recreate on every startup); manual schema management with no tooling.
+
+**Why not `update`:** Hibernate's `update` is blind to history — it compares the current entity state to the current schema and runs whatever ALTER TABLE closes the gap. It doesn't produce repeatable SQL files, doesn't track what has run, and produces different results depending on the current schema state. Two developers starting from different schema states get different ALTER TABLE statements. Flyway migrations are append-only, committed to git, and always produce the same final schema from any starting point.
+
+**Why not manual:** No auditability, no repeatability, no safety net for fresh environments.
+
+**Revisit if:** Never for manual. The `ddl-auto` question may be revisited in test configuration — Testcontainers tests may use a separate profile with `create-drop` for isolation.
+
+---
+
+## [Story 1] — `FOR UPDATE SKIP LOCKED` for worker job claiming
+
+**Decision:** Workers claim jobs using `SELECT FOR UPDATE SKIP LOCKED` — a database-level pessimistic write lock with skip-locked behaviour.
+
+**Alternatives considered:** Optimistic locking with a `version` column; application-level status-check-and-update without database locking; Redis-based claiming (deferred to Story 2).
+
+**Why not optimistic locking:** Optimistic locking assumes conflicts are rare and retries on collision. In a job queue, multiple workers competing for the same row is the normal operating condition, not a rare edge case. Under any real concurrency, optimistic locking produces constant retry storms.
+
+**Why not status-check-and-update without locking:** A worker reads a `PENDING` row, another worker reads the same row before the first has updated it to `RUNNING` — both claim the same job. `FOR UPDATE` makes the second worker block (or skip with `SKIP LOCKED`) until the first has committed, making the claim atomic at the database level.
+
+**Why `SKIP LOCKED` specifically:** Without it, `FOR UPDATE` makes a second worker wait blocked for the lock to release. `SKIP LOCKED` makes the second worker skip the locked row and claim the next available one instead — workers never block each other, throughput scales with worker count.
+
+**Revisit if:** Story 2 adds Redis as the hot queue — workers will pop from Redis instead of polling Postgres directly. The `FOR UPDATE SKIP LOCKED` pattern moves to the outbox relay at that point.
+
+---
+
+## [Story 1] — Two-transaction worker design
+
+**Decision:** The worker uses two separate transactions — `claimNextPending()` commits `RUNNING` status, then `markCompleted()` commits `COMPLETED` status — with job processing happening between them outside any transaction.
+
+**Alternatives considered:** Single long transaction spanning the full claim-process-complete lifecycle; claim and complete in one transaction with processing inside.
+
+**Why not single transaction:** A transaction holds a database connection for its entire duration. If processing takes 1–30 seconds, a single transaction holds a connection for that entire time. Under any real worker concurrency, the connection pool is exhausted. Additionally, the `FOR UPDATE` lock would be held for the full processing duration — serialising all worker activity through the lock even when using `SKIP LOCKED`.
+
+**Trade-off accepted:** The gap between the two transactions is an explicit failure window — if the worker dies after `claimNextPending()` commits but before `markCompleted()`, the job stays `RUNNING` forever. This is the known gap documented in Story 1.7 and closed by leasing in Story 3.
+
+**Revisit if:** Story 3 — the two-transaction design is retained but a heartbeat is added to the processing phase to close the failure window.
+
+---
+
+## [Story 1] — `fixedDelay` over `fixedRate` for worker polling
+
+**Decision:** `@Scheduled(fixedDelay = 500)` — the worker waits 500ms after each execution finishes before starting the next.
+
+**Alternatives considered:** `@Scheduled(fixedRate = 500)` — fires every 500ms on a wall-clock schedule regardless of execution time.
+
+**Why not fixedRate:** If a job takes 2 seconds to process, `fixedRate` queues the next poll call while the current one is still running. Calls pile up. Under sustained load this leads to a growing backlog of scheduled executions, increasing memory pressure and potentially causing overlapping executions of the same worker. `fixedDelay` always leaves a clean gap between executions regardless of how long each took.
+
+**Revisit if:** Story 4's multi-tier worker pools may use different intervals per tier — `CRITICAL` tier workers might poll more aggressively than `LOW` tier workers.
+
+---
+
+## [Story 1] — Separate `JobResponse` DTO, entity not exposed directly
+
+**Decision:** The controller returns `JobResponse` — a dedicated record — not the `Job` entity directly.
+
+**Alternatives considered:** Returning the `Job` entity directly from the controller; using a Jackson `@JsonIgnore` on internal fields.
+
+**Why not entity directly:** Any field added to `Job` for internal reasons — `published_at` (Story 2's outbox relay), `lease_id` (Story 3), `retry_count` (Story 5) — immediately leaks into the API response. The API shape becomes coupled to the database schema. `@JsonIgnore` is a partial fix but requires annotating every internal field individually and still leaves the entity boundary porous. `JobResponse` is a stable, explicit API contract that evolves independently of the entity.
+
+**Revisit if:** Never. The entity-to-DTO boundary is a permanent architectural line in this project.
+
+---
+
+## [Story 1] — `@JdbcTypeCode(SqlTypes.JSON)` required alongside `@Column(columnDefinition = "jsonb")`
+
+**Decision:** Annotate the `payload` field with both `@JdbcTypeCode(SqlTypes.JSON)` and `@Column(columnDefinition = "jsonb")`.
+
+**Why:** `@Column(columnDefinition = "jsonb")` only affects DDL — it controls what Hibernate writes in a CREATE TABLE statement. It says nothing about how to bind values at runtime. Without `@JdbcTypeCode(SqlTypes.JSON)`, Hibernate binds the String value as `character varying` at the JDBC layer, and Postgres rejects it with a type mismatch error. `@JdbcTypeCode` is the runtime instruction; `columnDefinition` is the schema instruction. Both are required.
+
+**Revisit if:** Payload type changes — if we ever move from `String` to `Map<String, Object>` or a typed DTO, the `@JdbcTypeCode(SqlTypes.JSON)` stays but the handling changes.
+
+---
+
+## [Story 1] — Spring Boot 4.x requires `spring-boot-flyway` module explicitly
+
+**Decision:** Add `spring-boot-flyway` as an explicit dependency alongside `flyway-core` and `flyway-database-postgresql`.
+
+**Why:** In Spring Boot 3.x, Flyway auto-configuration lived in `spring-boot-autoconfigure` and triggered automatically when `flyway-core` was on the classpath. In Spring Boot 4.x, auto-configurations have been split into individual modules. Flyway's wiring moved to `spring-boot-flyway` — which nothing pulls in transitively. Without it, the Flyway JARs are present but auto-configuration never triggers, so migrations never run and Hibernate's `validate` fails at startup.
+
+**Revisit if:** Never — this is a permanent requirement for Spring Boot 4.x.
+
+---
+
 ## Template (for future entries)
 
 ```markdown
