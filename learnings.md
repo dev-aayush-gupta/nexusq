@@ -263,6 +263,102 @@ The failure direction is the opposite: add a field to the entity without a migra
 
 ---
 
+## Redis with Spring Boot
+
+### How Redis stores data
+Redis stores everything as bytes. When you interact with it from Java, Spring needs to serialize your Java objects into bytes before writing and deserialize bytes back into Java objects when reading. The choice of serializer determines what your data looks like inside Redis.
+
+### `RedisTemplate` vs `StringRedisTemplate`
+
+| | `RedisTemplate<K, V>` | `StringRedisTemplate` |
+|---|---|---|
+| Default serializer | Java serialization (binary) | UTF-8 strings |
+| Readable in redis-cli | No — garbage bytes | Yes — plain text |
+| Language-agnostic | No — Java only | Yes |
+| Best for | Complex objects (rare) | String keys/values (most cases) |
+
+**Rule of thumb:** use `StringRedisTemplate` unless you have a specific reason not to. For job IDs (UUIDs serialized to strings), it's always the right choice.
+
+### Auto-configuration vs explicit bean
+
+Spring Boot auto-configures a `StringRedisTemplate` bean when `spring.data.redis.host` and `spring.data.redis.port` are present in `application.properties`. You don't need a `@Configuration` class for basic usage.
+
+```properties
+# application.properties
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
+```
+
+If you want the wiring to be explicit and visible (recommended for portfolio/learning projects), declare it yourself:
+
+```java
+@Configuration
+public class RedisConfig {
+
+    @Bean
+    public StringRedisTemplate stringRedisTemplate(RedisConnectionFactory connectionFactory) {
+        return new StringRedisTemplate(connectionFactory);
+    }
+}
+```
+
+Spring auto-configures the `RedisConnectionFactory` from your properties — you just accept it as a parameter and Spring injects it.
+
+### Redis data structures via Spring
+
+Spring exposes Redis data structures through `opsFor*()` methods on the template:
+
+| Method | Redis structure | Use case |
+|---|---|---|
+| `opsForValue()` | String | Simple key-value (counters, flags, cached values) |
+| `opsForList()` | List | Queues, stacks, ordered collections |
+| `opsForSet()` | Set | Unique membership tracking |
+| `opsForZSet()` | Sorted Set | Priority queues, leaderboards, scheduled items |
+| `opsForHash()` | Hash | Object fields, grouped key-value pairs |
+
+### Implementing a FIFO queue with Redis LIST
+
+Redis LISTs are doubly-linked lists. `LPUSH` inserts at the left (head), `RPOP` removes from the right (tail). Together they form a FIFO queue — first in, first out.
+
+```java
+@Component
+@RequiredArgsConstructor
+public class RedisJobQueue implements JobQueue {
+
+    private static final String QUEUE_KEY = "job_queue";
+
+    private final StringRedisTemplate redisTemplate;
+
+    @Override
+    public void push(UUID jobId) {
+        // LPUSH — insert at head
+        redisTemplate.opsForList().leftPush(QUEUE_KEY, jobId.toString());
+    }
+
+    @Override
+    public Optional<UUID> pop() {
+        // RPOP — remove from tail (returns null if list is empty)
+        String jobId = redisTemplate.opsForList().rightPop(QUEUE_KEY);
+        return Optional.ofNullable(jobId).map(UUID::fromString);
+    }
+}
+```
+
+**Why `Optional.ofNullable`?** `rightPop` returns `null` when the list is empty. Wrapping with `Optional.ofNullable` converts `null` to `Optional.empty()` and a real value to `Optional.of(value)`. The `.map(UUID::fromString)` then converts the string to UUID only if a value is present — it's skipped entirely on an empty Optional.
+
+**Why store as string?** UUIDs have a clean string representation (`550e8400-e29b-41d4-a716-446655440000`). Storing the string keeps Redis human-readable and avoids any serialization complexity. The interface (`JobQueue`) deals in `UUID` — the conversion to/from string is an implementation detail of `RedisJobQueue`.
+
+### Verifying in redis-cli
+
+After pushing a job, you can inspect the queue directly:
+```bash
+redis-cli -p 6380   # or your mapped port
+LLEN job_queue      # number of items in the queue
+LRANGE job_queue 0 -1  # see all items without removing them
+```
+
+---
+
 ## Compound indexes in Postgres
 
 A compound index covers multiple columns together:
