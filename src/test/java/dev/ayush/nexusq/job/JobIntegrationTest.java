@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -66,7 +67,7 @@ class JobIntegrationTest {
         UUID id = jobService.submit("{\"type\":\"email\"}", JobPriority.DEFAULT);
 
         await()
-                .atMost(15, SECONDS)
+                .atMost(30, SECONDS)
                 .pollInterval(1, SECONDS)
                 .until(() -> jobService.findById(id)
                         .map(job -> job.getStatus() == JobStatus.COMPLETED)
@@ -78,22 +79,59 @@ class JobIntegrationTest {
         assertThat(completed.getUpdatedAt()).isAfter(completed.getCreatedAt());
     }
 
-    // Story 1.7 — a job left RUNNING is never recovered by the worker
+    // Story 1.7 — a job left RUNNING is never recovered (no leasing yet)
     @Test
     void runningJob_isNeverPickedUpByWorker() throws InterruptedException {
         // Simulate a worker that claimed a job but crashed before completing it —
-        // insert directly as RUNNING, bypassing the normal claim flow
+        // insert directly as RUNNING, bypassing the normal claim flow.
+        // The publisher filters by status = PENDING so this row is never pushed to Redis.
         Job stuck = jobRepository.save(Job.builder()
                 .payload("{\"type\":\"stuck\"}")
                 .status(JobStatus.RUNNING)
                 .priority(JobPriority.DEFAULT)
                 .build());
 
-        // Wait 3 seconds — covers 1–2 poll cycles at the current 2000ms fixedDelay
-        // The worker only claims PENDING jobs, so this job should never be touched
-        Thread.sleep(3_000);
+        // Wait 5 seconds — covers multiple publisher cycles (1s) and worker poll cycles (2s).
+        // Neither should touch a RUNNING job.
+        Thread.sleep(5_000);
 
         Job afterWait = jobService.findById(stuck.getId()).orElseThrow();
         assertThat(afterWait.getStatus()).isEqualTo(JobStatus.RUNNING);
+    }
+
+    // Story 2.6 — job submitted while Redis is unavailable is still delivered after Redis recovers.
+    // Uses pause/unpause instead of stop/start to preserve the container port — Testcontainers
+    // assigns a new random port on every start(), which Spring's connection factory cannot follow
+    // at runtime. Pausing freezes the Redis process; the port stays the same on unpause.
+    @Test
+    void job_isDelivered_afterRedisRecovery() throws InterruptedException {
+        DockerClientFactory.instance().client()
+                .pauseContainerCmd(redis.getContainerId()).exec();
+
+        // Submit while Redis is paused — lands in Postgres with published_at = NULL
+        UUID id = jobService.submit("{\"type\":\"recovery-test\"}", JobPriority.DEFAULT);
+
+        // Wait long enough for the publisher to have attempted and been blocked by the paused Redis
+        Thread.sleep(3_000);
+
+        // Confirm job is still PENDING — publisher is blocked pushing to Redis, published_at not set
+        Job beforeRecovery = jobService.findById(id).orElseThrow();
+        assertThat(beforeRecovery.getStatus()).isEqualTo(JobStatus.PENDING);
+
+        // Unpause Redis — same port, blocked publisher push completes, transaction commits
+        DockerClientFactory.instance().client()
+                .unpauseContainerCmd(redis.getContainerId()).exec();
+
+        // Publisher delivers the job, worker picks it up and completes it
+        await()
+                .atMost(30, SECONDS)
+                .pollInterval(1, SECONDS)
+                .until(() -> jobService.findById(id)
+                        .map(job -> job.getStatus() == JobStatus.COMPLETED)
+                        .orElse(false));
+
+        Job completed = jobService.findById(id).orElseThrow();
+        assertThat(completed.getStatus()).isEqualTo(JobStatus.COMPLETED);
+        assertThat(completed.getPublishedAt()).isNotNull();
     }
 }
