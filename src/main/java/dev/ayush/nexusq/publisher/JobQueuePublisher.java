@@ -32,10 +32,12 @@ public class JobQueuePublisher {
             return;
         }
 
+        log.info("Publisher found {} unpublished job(s) — pushing to Redis", jobs.size());
+
         for (Job job : jobs) {
             jobQueue.push(job.getId());
             job.setPublishedAt(Instant.now());
-            log.info("Published job {} to queue", job.getId());
+            log.info("Published job [id={}, priority={}, payload={}] to queue", job.getId(), job.getPriority(), job.getPayload());
         }
     }
 }

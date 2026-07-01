@@ -66,7 +66,7 @@ flowchart TD
 |---|-------|------------------|------------|
 | 0 | Initialization | -[x] Done        | mostly no-AI / AI-low |
 | 1 | Walking skeleton (Postgres only) | -[x] Done        | mixed |
-| 2 | Dual-layer storage + outbox relay | - [ ] Not started | mostly no-AI |
+| 2 | Dual-layer storage + outbox relay | - [x] Done        | mostly no-AI |
 | 3 | Leasing + heartbeats | - [ ] Not started | mostly no-AI |
 | 4 | Priority scheduling | - [ ] Not started | mixed |
 | 5 | Backoff + decorrelated jitter | - [ ] Not started | mostly no-AI |
@@ -154,14 +154,14 @@ Keep the worker loop dumb on purpose. No interfaces, no abstraction yet — you 
 **Depends on:** Story 1. **Unlocks:** Story 3.
 
 ### Subtasks
-- [ ] **2.1** Add nullable `published_at` timestamp column to `jobs` — *5 min, AI-heavy — pure DDL*
-- [ ] **2.2** Redis config + a `JobQueueRepository` abstraction (push/pop, single tier for now) — *15 min, AI-low*
-- [ ] **2.3** `POST /jobs` now writes Postgres only — `published_at` stays `NULL`, no direct Redis write — *10 min, no-AI — this ordering choice is the entire point of the story*
-- [ ] **2.4** Build the outbox relay poller: scheduled task, `SELECT WHERE published_at IS NULL FOR UPDATE SKIP LOCKED`, push to Redis, `UPDATE published_at` — *20 min, no-AI — the core mechanism, write it yourself*
-- [ ] **2.5** Worker now pops from Redis instead of polling Postgres directly; on pop, load full payload from Postgres — *15 min, AI-low*
-- [ ] **2.6** Integration test: submit a job, kill Redis before the relay runs, restart Redis, confirm the relay still delivers it — *20 min, no-AI — first concurrency-adjacent failure test; this harness amortizes into Stories 3–10*
-- [ ] **2.7** Remove the Story 1 stopgap worker logic — *10 min, AI-low*
-- [ ] **2.8** Document the Postgres-first-vs-Redis-first write ordering decision in `decisions.md` — *10 min, no-AI*
+- [x] **2.1** Add nullable `published_at` timestamp column to `jobs` — *5 min, AI-heavy — pure DDL*
+- [x] **2.2** Redis config + a `JobQueueRepository` abstraction (push/pop, single tier for now) — *15 min, AI-low*
+- [x] **2.3** `POST /jobs` now writes Postgres only — `published_at` stays `NULL`, no direct Redis write — *10 min, no-AI — this ordering choice is the entire point of the story*
+- [x] **2.4** Build the outbox relay poller: scheduled task, `SELECT WHERE published_at IS NULL FOR UPDATE SKIP LOCKED`, push to Redis, `UPDATE published_at` — *20 min, no-AI — the core mechanism, write it yourself*
+- [x] **2.5** Worker now pops from Redis instead of polling Postgres directly; on pop, load full payload from Postgres — *15 min, AI-low*
+- [x] **2.6** Integration test: submit a job, kill Redis before the relay runs, restart Redis, confirm the relay still delivers it — *20 min, no-AI — first concurrency-adjacent failure test; this harness amortizes into Stories 3–10*
+- [x] **2.7** Remove the Story 1 stopgap worker logic — *10 min, AI-low*
+- [x] **2.8** Document the Postgres-first-vs-Redis-first write ordering decision in `decisions.md` — *10 min, no-AI*
 
 ### Acceptance criteria
 - A job submitted while Redis is down is still delivered once Redis recovers and the relay's next scheduled run fires — zero manual intervention.

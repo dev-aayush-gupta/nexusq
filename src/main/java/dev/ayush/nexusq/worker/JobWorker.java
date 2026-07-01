@@ -45,7 +45,7 @@ public class JobWorker {
         }
 
         jobService.markRunning(id);
-        log.info("Processing job {}", id);
+        log.info("Worker picked up job [id={}, payload={}] — marked RUNNING", id, job.getPayload());
 
         try {
             Thread.sleep(5000);
@@ -58,9 +58,9 @@ public class JobWorker {
         // This is the known gap closed by leasing in Story 3.
         try {
             jobService.markCompleted(id);
-            log.info("Completed job {}", id);
+            log.info("Worker completed job [id={}] — marked COMPLETED", id);
         } catch (Exception e) {
-            log.error("Failed to complete job {} — job will remain RUNNING until Story 3 leasing recovery", id, e);
+            log.error("Worker failed to complete job [id={}] — will remain RUNNING until Story 3 leasing recovery", id, e);
         }
     }
 }
