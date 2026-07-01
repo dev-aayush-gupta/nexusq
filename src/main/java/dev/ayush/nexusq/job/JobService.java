@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -44,18 +43,12 @@ public class JobService {
         return jobRepository.findById(id);
     }
 
-    // Claims the next PENDING job — sets it RUNNING and commits.
-    // If the process dies before markCompleted(), the job stays RUNNING forever (Story 1.7's known gap).
     @Transactional
-    public Optional<Job> claimNextPending() {
-        return jobRepository
-                .findByStatusForUpdateSkipLocked(JobStatus.PENDING, PageRequest.of(0, 1))
-                .stream()
-                .findFirst()
-                .map(job -> {
-                    job.setStatus(JobStatus.RUNNING);
-                    return job;
-                });
+    public void markRunning(UUID id) {
+        jobRepository.findById(id).ifPresentOrElse(
+                job -> job.setStatus(JobStatus.RUNNING),
+                () -> log.warn("markRunning called for unknown job {} — already deleted?", id)
+        );
     }
 
     @Transactional

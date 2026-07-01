@@ -186,6 +186,89 @@
 
 ---
 
+## [Story 2] — Postgres-first write ordering (outbox pattern)
+
+**Decision:** `POST /jobs` writes only to Postgres (`published_at = NULL`). A separate `JobQueuePublisher` scheduler polls for unpublished PENDING jobs and pushes them to Redis, then sets `published_at = now()`.
+
+**Alternatives considered:** Writing to Redis directly in `POST /jobs` (Redis-first); writing to both atomically in the request handler.
+
+**Why not Redis-first:** If the Postgres write fails after a Redis push, Redis has a job that no durable record backs. On worker pop the job_id resolves to nothing in Postgres — silent data loss. Postgres-first guarantees a durable row always exists before anything reaches the queue.
+
+**Why not write to both in the request handler:** Cross-system atomicity (Postgres + Redis in one request) is not achievable without a distributed transaction. If Redis is down at submission time, the request fails unnecessarily — the queue being temporarily unavailable should not block job acceptance. The outbox relay decouples submission availability from queue availability.
+
+**Revisit if:** Never for the ordering principle. The relay mechanism is reused as-is by Story 9 (Kafka ingestion).
+
+---
+
+## [Story 2] — `job_queue` as Redis key name (not tier-prefixed yet)
+
+**Decision:** Use `job_queue` as the Redis list key for Story 2. Story 4 renames this to `job_queue:{tier}` (e.g. `job_queue:critical`, `job_queue:low`) when per-tier pools are introduced.
+
+**Alternatives considered:** Using `queue:default` now to match the final naming convention from the start.
+
+**Why not now:** The rename in Story 4 is deliberate — it should be a visible, intentional change that signals the introduction of the tier concept. Using a generic key now keeps Story 2 simple and makes the Story 4 structural change obvious rather than a silent extension.
+
+**Revisit if:** Story 4.
+
+---
+
+## [Story 2] — RPOP over BRPOP for worker polling
+
+**Decision:** Worker uses non-blocking `RPOP` inside a `@Scheduled(fixedDelay)` loop, not `BRPOP`.
+
+**Alternatives considered:** `BRPOP` (blocking pop — server holds the connection until a job arrives).
+
+**Why not BRPOP:**
+- Holds a Redis connection open for the full wait duration — can't be returned to the pool, starving other operations (relay, heartbeats in Story 3, dedup in Story 8) under load.
+- Blocks the calling thread — incompatible with Spring's shared `@Scheduled` thread pool without a dedicated `ExecutorService` per worker.
+- Graceful shutdown requires custom interrupt handling; `@Scheduled` shuts down cleanly for free.
+- No natural backpressure — BRPOP fires the moment a job arrives even if the worker is already at capacity; RPOP's polling loop provides backpressure inherently.
+
+**Revisit if:** Story 4 introduces dedicated per-tier thread pools — at that point BRPOP becomes viable and worth reconsidering for lower idle latency.
+
+---
+
+## [Story 2] — `RelayTarget` / `JobQueue` interface introduced with one implementation
+
+**Decision:** Introduce a `JobQueue` interface (push/pop contract) with `RedisJobQueue` as its sole implementation in Story 2.
+
+**Alternatives considered:** Concrete `RedisJobQueue` class only, extract interface in Story 9 when a second implementation actually exists (YAGNI).
+
+**Why now:** Story 9 will introduce a second writer through the same relay. Having the interface in place means Story 9 adds a new implementation without touching any existing class — the Open/Closed principle pays off concretely. The cost of the interface today is near-zero; retrofitting it in Story 9 requires touching every call site.
+
+**Revisit if:** Never — the interface earns its keep in Story 9.
+
+---
+
+## [Story 2] — Package structure: `queue/` and `publisher/` as top-level siblings to `job/`
+
+**Decision:** Redis queue code lives in `queue/redis/`, the outbox publisher in `publisher/` — both top-level packages, not sub-packages of `job/`.
+
+**Alternatives considered:** `job/queue/` and `job/publisher/` as sub-packages under `job/`.
+
+**Why not under `job/`:** The relay and queue are infrastructure that the job domain uses — they are not part of the job domain itself. Putting them under `job/` would imply the job feature owns its own queue and scheduler, which is false. As sibling packages they are clearly shared infrastructure with no ownership coupling.
+
+**Revisit if:** A genuine multi-module split around Story 6 — at that point `queue/` and `publisher/` become natural candidates for a shared infrastructure module.
+
+---
+
+## [Story 2] — Known gaps accepted, deferred to future stories
+
+The following failure scenarios are understood, documented, and deliberately deferred:
+
+**Gap 1 — Worker pops job_id, then Postgres is unreachable.**
+The job_id is gone from Redis (pop is destructive). The job is still PENDING in Postgres with `published_at` already set — the relay won't re-publish it. The job is invisible to all recovery paths until manual intervention. Closed by Story 3 leasing, which tracks the relay-to-worker handoff.
+
+**Gap 2 — Worker crashes after pop, before marking RUNNING.**
+Same stuck state as Gap 1. The job is PENDING in Postgres, not in Redis, with `published_at` set. Story 3's reaper recovers RUNNING jobs; this PENDING-but-orphaned case is also addressed once the full lease lifecycle is in place.
+
+**Gap 3 — Double-push on relay crash.**
+Relay pushes to Redis, then crashes before `published_at` is committed. Next relay run sees `published_at IS NULL` and pushes again. Two copies of the same job_id in Redis → two workers process the same job. Closed by Story 3 leasing (only one worker wins the atomic claim) and fully sealed by Story 8 idempotency (side effect fires exactly once regardless).
+
+**Why accepted now:** Attempting to close these gaps in Story 2 would require leasing or idempotency logic that belongs to Stories 3 and 8 by design. Building them early means designing against unknown constraints; building them in order means designing against discovered ones.
+
+---
+
 ## Template (for future entries)
 
 ```markdown

@@ -42,4 +42,7 @@ public class Job {
     @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
+
+    @Column(name = "published_at")
+    private Instant publishedAt;
 }

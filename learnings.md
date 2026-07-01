@@ -253,6 +253,16 @@ When the app shuts down, Spring interrupts the scheduler thread. If the worker i
 
 ---
 
+## Hibernate `validate` is one-directional
+
+`ddl-auto = validate` checks that every field mapped in the entity has a corresponding column in the database. It does **not** check the reverse — extra columns in the database that have no matching entity field are silently ignored. Hibernate never reads or writes those columns, so it has no reason to care they exist.
+
+**Practical implication:** you can safely run a Flyway migration to add a column before updating the entity. The app keeps running against the old schema until the entity catches up. This enables zero-downtime schema changes in production — deploy the migration first, verify the column exists, then deploy the code that maps it.
+
+The failure direction is the opposite: add a field to the entity without a migration, and Hibernate throws at startup because it looks for a column that doesn't exist.
+
+---
+
 ## Compound indexes in Postgres
 
 A compound index covers multiple columns together:
