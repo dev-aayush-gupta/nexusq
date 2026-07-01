@@ -172,6 +172,53 @@ In `JobWorker`, two separate `@Transactional` methods are used intentionally:
 
 Processing happens between them, outside any transaction. This is correct — holding a transaction open across seconds of processing would exhaust the connection pool. The gap between the two commits is an accepted failure window (closed by leasing in Story 3).
 
+### How `@Transactional` actually works — the proxy
+
+Spring doesn't modify your class. Instead it wraps it in a **proxy** — an automatically generated subclass that intercepts method calls. The sequence every time a `@Transactional` method is called:
+
+```
+Spring proxy intercepts the call
+  → opens a database transaction (acquires a connection from the pool)
+    → your method runs
+  → method returns normally
+    → Hibernate flushes dirty entities (issues UPDATE/INSERT SQL)
+    → transaction commits
+  → connection returned to pool
+
+If an unchecked exception is thrown instead:
+    → transaction rolls back
+    → no changes reach the database
+```
+
+### Hibernate dirty checking — why you don't always call `save()`
+
+While your method runs inside a transaction, Hibernate keeps an **in-memory snapshot** of every entity it loaded. When the transaction is about to commit, Hibernate compares the current state of each entity against that snapshot. Any field that changed gets an `UPDATE` SQL issued automatically. This is called the **flush**.
+
+```java
+// No save() needed — Hibernate sees publishedAt changed and issues UPDATE on commit
+@Transactional
+public void publish() {
+    Job job = jobRepository.findById(id).orElseThrow();
+    job.setPublishedAt(Instant.now()); // Hibernate tracks this change
+}                                      // transaction commits here → UPDATE fires
+```
+
+**The critical distinction — when `save()` IS required:**
+Dirty checking only tracks entities Hibernate already knows about (loaded from the database within the current session). A brand new object built with `Job.builder().build()` is unknown to Hibernate — you must call `save()` explicitly to register it.
+
+```java
+// save() IS required — this is a new object Hibernate has never seen
+@Transactional
+public UUID submit(String payload) {
+    Job job = Job.builder().payload(payload).status(JobStatus.PENDING).build();
+    return jobRepository.save(job).getId(); // registers with Hibernate + issues INSERT
+}
+```
+
+**Rule of thumb:**
+- Loaded from DB within `@Transactional` → mutate fields freely, no `save()` needed
+- Brand new object → must call `save()` to trigger INSERT and start tracking
+
 ---
 
 ## Java `Optional`
